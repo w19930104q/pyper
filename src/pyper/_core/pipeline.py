@@ -14,6 +14,7 @@ else:
 
 if t.TYPE_CHECKING:
     from .task import Task
+    from .fork import Fork
 
 
 _P = ParamSpec('P')
@@ -33,15 +34,18 @@ class Pipeline(t.Generic[_P, _R]):
     ```
     """
 
-    def __new__(cls, tasks: t.List[Task]):
-        if any(task.is_async for task in tasks):
+    def __new__(cls, tasks: t.List[t.Union[Task, "Fork"]]):
+        if any(getattr(node, "is_async", False) for node in tasks):
             instance = object.__new__(AsyncPipeline)
         else:
             instance = object.__new__(cls)
         instance.__init__(tasks=tasks)
         return instance
 
-    def __init__(self, tasks: t.List[Task]):
+    def __init__(self, tasks: t.List[t.Union[Task, "Fork"]]):
+        # `tasks` is the flat list of pipeline nodes: regular `Task` objects and
+        # `Fork` fork/join nodes. The attribute name is kept for backwards
+        # compatibility; each Fork encapsulates its own branch pipelines.
         self.tasks = tasks
 
     def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> t.Generator[_R]:
@@ -96,7 +100,7 @@ class Pipeline(t.Generic[_P, _R]):
         return self.consume(other)
     
     def __repr__(self):
-        return f"<{self.__class__.__name__} {[task.func for task in self.tasks]}>"
+        return f"<{self.__class__.__name__} {[getattr(node, 'func', node.__class__.__name__) for node in self.tasks]}>"
 
 
 class AsyncPipeline(Pipeline[_P, _R]):

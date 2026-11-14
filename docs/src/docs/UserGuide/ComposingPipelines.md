@@ -131,6 +131,75 @@ download_and_merge_files = (
 * `download_files_from_source` takes a source as input, and returns a generator of filepaths (note that we are _not_ setting `branch=True`; a batch of filepaths is being passed along per source)
 * `sync_files` takes each batch of filepaths as input, and works on them concurrently
 
+## Forking and Joining
+
+The `|` operator builds a strictly _linear_ data flow: each item passes through one task at a time, in order. Sometimes a single item needs to be processed by several independent tasks _at the same time_ — for example writing it to a database, annotating it, and raising an alert — before the results are brought back together. This is an explicit **fork/join**, created with the `fork` function.
+
+```python
+from pyper import task, fork
+
+def collect():
+    yield 1
+    yield 2
+
+def persist(data):
+    return ("persisted", data)
+
+def tag(data):
+    return ("tagged", data)
+
+def alert(data):
+    return ("alerted", data)
+
+pipeline = task(collect, branch=True) | fork(
+    task(persist),
+    task(tag),
+    task(alert),
+)
+```
+
+For every input item, `fork` dispatches the item (unchanged) to every branch and runs the branches concurrently. Once all branches have produced their result for that item, the results are regrouped into a **tuple in branch order**, and the tuples are emitted to the next task **in the order of the original inputs** — even when the branches finish out of order.
+
+```python
+if __name__ == "__main__":
+    for output in pipeline():
+        print(output)
+        #> ('persisted', 1), ('tagged', 1), ('alerted', 1)
+        #> ('persisted', 2), ('tagged', 2), ('alerted', 2)
+```
+
+A branch can itself be a multi-task pipeline:
+
+```python
+pipeline = task(collect, branch=True) | fork(
+    task(step_a) | task(step_b),
+    task(step_c),
+)
+```
+
+### How it differs from `branch` / `join`
+
+`branch=True` and `join=True` are about the _number_ of items: a branching task emits many items from one input, and a joining task consumes the whole stream. `fork` is about running the _same item through several independent tasks in parallel_ and regrouping their results per item. The two mechanisms are complementary and address different shapes of data flow.
+
+### Constraints
+
+Each branch must produce exactly one result per input, so within a fork:
+
+* branch tasks cannot use `branch=True` (one-in/many-out) or `join=True` (consume the whole stream)
+* a `fork` cannot contain another `fork` (nested fork/join is not supported)
+* a `fork` cannot be the first node of a pipeline — it needs an upstream task to fan out
+
+These constraints, together with invalid `workers`/`throttle` values, are raised before the pipeline starts running (at construction time or when the pipeline is called), never halfway through execution.
+
+### Concurrency semantics
+
+Fork/join reuses Pyper's existing execution model, so everything that applies to ordinary tasks applies unchanged inside a branch:
+
+* **lazy execution** — no work happens until you iterate over the output, and `throttle` (on the `fork` node or any task) bounds in-memory queue sizes for backpressure
+* **workers / throttle / multiprocess** — branch tasks accept the same parameters; threaded, multiprocessed and asynchronous tasks can be mixed across branches
+* **failure and cancellation** — if any branch raises, the error propagates to the consumer and all other branches are shut down; closing the output generator early tears the whole fork down
+* **ordering** — regrouping always restores input order regardless of which branch happens to finish first
+
 ## Asynchronous Code
 
 Recall that an `AsyncPipeline` is created from an asynchronous function:
